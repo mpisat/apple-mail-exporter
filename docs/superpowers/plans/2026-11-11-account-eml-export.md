@@ -33,8 +33,8 @@ Files: create `Sources/AppleMailExporter/AccountExport.swift`, create `tests/App
 ### Task 3: Review and delivery
 
 - [x] Obtain independent spec review, then code quality review; verify findings against source and fix with red/green checks.
-- [ ] Re-read the complete diff, integrate into the delivery `main` branch, re-run checks on that tree, and install the binary in the user's local bin directory.
-- [ ] Keep exported personal messages and reports outside git. Push only source to an authorized delivery remote if available; otherwise report the exact local branch/commit and the remaining delivery limitation.
+- [x] Re-read the complete diff, integrate into the delivery `main` branch, re-run checks on that tree, and install the binary in the user's local bin directory.
+- [x] Keep exported personal messages and reports outside git. Push only source to the owner's `mpisat/apple-mail-exporter` delivery fork, `main` branch.
 
 ## Acceptance evidence
 
@@ -43,3 +43,5 @@ Use native Mac tooling only. Checks are `swift test`, `swift build -c release`, 
 Observed before integration: all 66 Swift tests passed; debug, release and installed-binary CLI acceptance passed. The optimized binary exported and independently byte-verified 10,000 synthetic messages in 15.94 seconds, with 89.7 MiB child peak RSS on this Mac. Public reference corpus conversion restored nine detached payloads across five messages; remaining corpus failures identify absent attachments or truncated EMLX files. Encoded lengths cannot prove same-length source integrity, and unknown quoted-printable encoder lengths are reported as unverified rather than guessed corrupt.
 
 Verified review fixes cover conflicting account selectors, duplicate account names, full Mail-store output protection, macOS path aliases, attached EMLX files being misidentified as messages, empty MIME media types, digest defaults, base64 wrapping, exact Finder metadata exclusion and typed attachment metadata failures. Spec re-reviews and final bounded code quality review approved the corrected source.
+
+Integrated `main` validation: all 66 tests passed; debug and optimized release CLI acceptance passed; all 10,000 synthetic EMLs passed independent byte comparisons, with export taking 9.08 seconds and 89.7 MiB peak child RSS. The installed `~/.local/bin/apple-mail-exporter` matches the integrated release binary. Implementation commit `2d76c081af468501e1bb8010ed69b8b3bbe9b3e5` was pushed to the owner's fork. Actual Mail account discovery and real archive export are still unverified because this command runner cannot access the user's Mail store or Mail automation; the user can exercise those paths from iTerm, which has Full Disk Access.
