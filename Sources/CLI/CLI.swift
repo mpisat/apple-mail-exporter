@@ -32,7 +32,61 @@ struct AppleMailExporterCLI: ParsableCommand {
     @Option(name: .customLong("mail-base"), help: "Override the Mail base directory.")
     var mailBase: String?
 
+    @Flag(name: .customLong("list-accounts"), help: "List Apple Mail account names, IDs and local directories.")
+    var listAccounts = false
+
+    @Option(name: .long, help: "Export every locally stored message of this account name or ID as EML.")
+    var account: String?
+
+    @Option(name: .customLong("account-dir"), help: "Export an offline account directory directly as EML.")
+    var accountDir: String?
+
+    func validate() throws {
+        if listAccounts || account != nil || accountDir != nil {
+            guard keywords.isEmpty, limit == 0, !listOnly, !interactiveMode else {
+                throw ValidationError("Account EML export does not accept keyword filters, result limits, --list-only or --interactive.")
+            }
+            guard !listAccounts || (account == nil && accountDir == nil) else {
+                throw ValidationError("Use --list-accounts separately from an account export.")
+            }
+            guard account == nil || accountDir == nil else {
+                throw ValidationError("--account and --account-dir are alternative account selectors; use one.")
+            }
+            guard mailDir == nil, mailBase == nil else {
+                throw ValidationError("For account EML export use --account-dir to select an offline account directory.")
+            }
+            guard account?.isEmpty != true, accountDir?.isEmpty != true else {
+                throw ValidationError("Account names and paths must not be empty.")
+            }
+        }
+    }
+
     func run() throws {
+        if listAccounts {
+            let accounts = try discoverMailAccounts()
+            for account in accounts {
+                print("\(account.name)\t\(account.id)\t\(account.directory.path)")
+            }
+            print("\(accounts.count) accounts")
+            return
+        }
+        if account != nil || accountDir != nil {
+            let selected: MailAccount
+            if let accountDir {
+                let path = URL(fileURLWithPath: (accountDir as NSString).expandingTildeInPath).standardizedFileURL
+                selected = MailAccount(id: path.lastPathComponent, name: path.lastPathComponent, directory: path)
+            } else if let account {
+                selected = try selectMailAccount(named: account, accounts: discoverMailAccounts())
+            } else { return }
+            let outputURL = URL(fileURLWithPath: (output as NSString).expandingTildeInPath)
+            print("Exporting every locally stored message from \(selected.name) as EML...")
+            let result = try exportAccount(selected, output: outputURL) { progress in
+                print("\(progress.found) found; \(progress.exported) exported; \(progress.unchanged) unchanged; \(progress.failed) failed; \(progress.scanErrors) scan errors")
+            }
+            print("Report: \(result.reportURL.path)")
+            if result.failed > 0 || result.scanErrors > 0 { throw ExitCode.failure }
+            return
+        }
         let mailDirURL = mailDir.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         let mailBaseURL = mailBase.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
 
