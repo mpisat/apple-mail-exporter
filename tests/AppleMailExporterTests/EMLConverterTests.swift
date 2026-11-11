@@ -265,6 +265,85 @@ import Testing
         expectFailure(source, "unverified_attachment_size")
     }
 
+    @Test func acceptsCachedTextWithCanonicalWireLineEndingLength() throws {
+        // Mail can cache 30 LF-terminated bytes for a 32-byte CRLF wire body.
+        let raw = Data("BEGIN:VCALENDAR\nEND:VCALENDAR\n".utf8)
+        let headers = part(length: "32", encoding: "7bit")
+            .replacingOccurrences(of: "application/octet-stream", with: "text/calendar")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        let output = String(decoding: try convertEMLXToEML(at: source), as: UTF8.self)
+        let body = try #require(output.components(separatedBy: "\r\n\r\n").last)
+        #expect(Data(base64Encoded: body, options: .ignoreUnknownCharacters) == raw)
+    }
+
+    @Test func acceptsEightBitCachedTextWithCanonicalWireLength() throws {
+        let raw = Data([0xC3, 0xA9, 10])
+        let headers = part(length: "4", encoding: "8bit")
+            .replacingOccurrences(of: "application/octet-stream", with: "text/plain")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        let output = String(decoding: try convertEMLXToEML(at: source), as: UTF8.self)
+        let body = try #require(output.components(separatedBy: "\r\n\r\n").last)
+        #expect(Data(base64Encoded: body, options: .ignoreUnknownCharacters) == raw)
+    }
+
+    @Test func lineEndingNormalizationDoesNotAcceptOtherSizeMismatches() throws {
+        let raw = Data("BEGIN:VCALENDAR\nEND:VCALENDAR\n".utf8)
+        let headers = part(length: "33", encoding: "7bit")
+            .replacingOccurrences(of: "application/octet-stream", with: "text/calendar")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        expectFailure(source, "attachment_size_mismatch")
+    }
+
+    @Test func binaryAttachmentsDoNotReceiveTextLineEndingAllowance() throws {
+        let raw = Data("BEGIN:VCALENDAR\nEND:VCALENDAR\n".utf8)
+        let source = try fixture(Data(part(length: "32", encoding: "7bit").utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        expectFailure(source, "attachment_size_mismatch")
+    }
+
+    @Test(arguments: ["binary", "8bit"])
+    func detachedAttachedMessagePreservesFullBytesDespiteStaleLength(encoding: String) throws {
+        let raw = Data("From: attached@example.test\r\nSubject: Full attached email\r\n\r\nComplete content\r\n".utf8)
+        let headers = part(length: "3", encoding: encoding)
+            .replacingOccurrences(of: "application/octet-stream", with: "message/rfc822")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        let output = try convertEMLXToEML(at: source)
+        let separator = try #require(output.range(of: Data("\r\n\r\n".utf8)))
+        #expect(Data(output[separator.upperBound...]) == raw)
+        #expect(String(decoding: output, as: UTF8.self).contains("Content-Transfer-Encoding: \(encoding)\r\n"))
+        #expect(!String(decoding: output, as: UTF8.self).contains("X-Apple-Content-Length"))
+    }
+
+    @Test func missingAttachedMessageStillFailsExplicitly() throws {
+        let headers = part(length: "362", encoding: "binary")
+            .replacingOccurrences(of: "application/octet-stream", with: "message/rfc822")
+        let source = try fixture(Data(headers.utf8))
+        defer { cleanup(source) }
+        expectFailure(source, "missing_attachment")
+    }
+
+    @Test(arguments: [Data(), Data("From: truncated@example.test\r\n".utf8)])
+    func staleLengthDoesNotAcceptAnUndersizedAttachedMessage(raw: Data) throws {
+        let headers = part(length: "362", encoding: "binary")
+            .replacingOccurrences(of: "application/octet-stream", with: "message/rfc822")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        expectFailure(source, "attachment_size_mismatch")
+    }
+
+    @Test func staleLengthRequiresAttachedMessageHeaderFraming() throws {
+        let raw = Data(("From: " + String(repeating: "x", count: 400) + "\r\n").utf8)
+        let headers = part(length: "362", encoding: "binary")
+            .replacingOccurrences(of: "application/octet-stream", with: "message/rfc822")
+        let source = try fixture(Data(headers.utf8), attachments: ["1/blob.bin": raw])
+        defer { cleanup(source) }
+        expectFailure(source, "malformed_attachment")
+    }
+
     @Test func vanishedAttachmentMetadataHasTypedFailure() throws {
         let missing = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
         do {

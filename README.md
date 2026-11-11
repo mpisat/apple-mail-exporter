@@ -55,6 +55,18 @@ Complete messages retain their original payload bytes and headers. Detached atta
 
 Progress and totals appear in the terminal. `export-report.jsonl` records every processed source, destination, result and structured failure reason; directory scan errors are also recorded. The exit status is nonzero if any message or subtree could not be exported. A repeat run compares EML contents, leaves identical files unchanged and replaces the report with the current run's results. Source Mail data is read-only; choose an output directory outside the source mail store.
 
+## Readable date and subject folders
+
+For a fresh export organized as `YYYY/MM/YYYY-MM-DD - Subject__ID.eml`, use the readable runner. It scans all local messages directly, without Mail automation or account-name selection. The output directory must be new. Subjects are decoded and made safe for filenames; unique IDs keep repeated subjects separate. Messages without a usable Date header go under `Undated`. The report retains each original account, mailbox path and message ID.
+
+```bash
+mkdir -p .build
+swiftc -O -swift-version 6 -parse-as-library Sources/AppleMailExporter/EMLConverter.swift scripts/EMLConversionWorker.swift -o .build/apple-mail-conversion-worker
+python3 scripts/export_readable.py --output /path/to/new/MailExport-Readable --control /tmp/new-mail-export-run --worker .build/apple-mail-conversion-worker
+```
+
+The runner uses eight persistent native conversion workers. Add `--priority-account UUID` to process a particular account first. `export-report.jsonl` and `summary.json` are copied to the export directory after the run; progress and the working report are available in the control directory during conversion. Missing source attachments are reported explicitly, and all other messages continue. Native-worker failures leave queued work available to surviving workers rather than marking healthy messages corrupt.
+
 ## Checks
 
 ```bash
@@ -64,6 +76,7 @@ python3 tests/cli_acceptance.py .build/debug/apple-mail-exporter
 swift build -c release
 python3 tests/cli_acceptance.py .build/release/apple-mail-exporter
 python3 tests/scale_acceptance.py .build/release/apple-mail-exporter
+python3 tests/readable_acceptance.py .build/apple-mail-conversion-worker
 ```
 
 ## Usage

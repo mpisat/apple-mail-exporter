@@ -189,19 +189,22 @@ private struct MIMERebuilder {
             let encodings = fields.filter { $0.name == "content-transfer-encoding" }
             guard encodings.count <= 1 else { throw fail("malformed_attachment", "Duplicate transfer-encoding header") }
             let encoding = value("content-transfer-encoding")?.lowercased() ?? "7bit"
-            try validateLength(raw, declared: count, encoding: encoding, newline: block.newline)
+            try validateLength(raw, declared: count, encoding: encoding, mediaType: mediaType)
+            let preserveAttachedMessage = mediaType == "message/rfc822" && ["7bit", "8bit", "binary"].contains(encoding)
+            let replacementEncoding = preserveAttachedMessage ? encoding : "base64"
             for field in detached { edits.append(MIMEEdit(range: field.range, replacement: Data())) }
             if let field = encodings.first {
-                // Keep already-base64 headers byte-for-byte, including their capitalization.
-                if encoding != "base64" {
-                    edits.append(MIMEEdit(range: field.range, replacement: Data("Content-Transfer-Encoding: base64\(block.newline)".utf8)))
+                if encoding != replacementEncoding {
+                    edits.append(MIMEEdit(range: field.range, replacement: Data("Content-Transfer-Encoding: \(replacementEncoding)\(block.newline)".utf8)))
                 }
-            } else {
+            } else if !preserveAttachedMessage {
                 // Insert before the blank separator, after the final header line.
                 let insertion = fields.last?.range.upperBound ?? range.lowerBound
                 edits.append(MIMEEdit(range: insertion..<insertion, replacement: Data("Content-Transfer-Encoding: base64\(block.newline)".utf8)))
             }
-            edits.append(MIMEEdit(range: block.body..<range.upperBound, replacement: base64(raw, newline: block.newline)))
+            // RFC 2046 permits raw 7bit/8bit/binary attached messages; retain their bytes and encoding.
+            let restoredBody = preserveAttachedMessage ? raw : base64(raw, newline: block.newline)
+            edits.append(MIMEEdit(range: block.body..<range.upperBound, replacement: restoredBody))
             return
         }
 
@@ -312,7 +315,7 @@ private struct MIMERebuilder {
         }
     }
 
-    private func validateLength(_ raw: Data, declared: Int, encoding: String, newline: String) throws {
+    private func validateLength(_ raw: Data, declared: Int, encoding: String, mediaType: String) throws {
         var lengths: Set<Int> = []
         switch encoding {
         case "base64":
@@ -331,7 +334,27 @@ private struct MIMERebuilder {
             if encoding == "7bit" && raw.contains(where: { $0 > 127 }) {
                 throw fail("malformed_attachment", "A 7bit attachment contains non-ASCII bytes")
             }
+            // Some Mail caches retain a short earlier length for a larger, full
+            // attached email. Require complete header framing before allowing that case.
+            if mediaType == "message/rfc822", raw.count > declared {
+                let nested = MIMERebuilder(data: raw, attachmentRoot: attachmentRoot)
+                guard let header = try nested.headers(in: 0..<nested.bytes.count), !header.fields.isEmpty else {
+                    throw fail("malformed_attachment", "Attached message has no complete header framing")
+                }
+                return
+            }
             lengths.insert(raw.count)
+            if (encoding == "7bit" || encoding == "8bit"), mediaType.hasPrefix("text/") {
+                // Mail can cache text/calendar with LF while retaining the CRLF wire size.
+                // Accept that exact canonical-size difference without changing cached bytes.
+                var canonicalLength = raw.count
+                var previous: UInt8?
+                for byte in raw {
+                    if byte == 10 && previous != 13 { canonicalLength += 1 }
+                    previous = byte
+                }
+                lengths.insert(canonicalLength)
+            }
         case "quoted-printable":
             for lineEnding in ["\n", "\r\n"] {
                 for wordWrap in [false, true] {
