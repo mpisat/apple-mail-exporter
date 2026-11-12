@@ -67,6 +67,22 @@ python3 scripts/export_readable.py --output /path/to/new/MailExport-Readable --c
 
 The runner uses eight persistent native conversion workers. Add `--priority-account UUID` to process a particular account first. `export-report.jsonl` and `summary.json` are copied to the export directory after the run; progress and the working report are available in the control directory during conversion. Missing source attachments are reported explicitly, and all other messages continue. Native-worker failures leave queued work available to surviving workers rather than marking healthy messages corrupt.
 
+## Markdown with local attachments
+
+Convert an existing complete readable EML export into a separate, new Markdown directory:
+
+```bash
+python3 scripts/export_markdown.py --input /path/to/MailExport-Readable --input-report /path/to/MailExport-Readable/export-report.jsonl --output /path/to/new/MailExport-Markdown --control /tmp/new-markdown-export-run
+```
+
+This Python 3 runner uses only the standard library. It scans every `.eml` under the input, preserves its date folders and unique ID, and writes `YYYY/MM/YYYY-MM-DD - Subject__ID.md` (or the existing `Undated` layout). The optional input report supplies account and original-source metadata; it never filters the input files. Add `--priority-account UUID` to process matching report accounts first. Eight threads run by default; `--workers N` selects a positive worker count.
+
+Messages contain decoded headers and readable MIME text. Plain text is preferred in alternatives; HTML-only messages become Markdown text, headings and links. Explicit attachments and inline resources are decoded beside the message as `EMAIL_STEM_att_01_SANITIZED_ORIGINAL.ext`, with separate numbers for duplicate names. CID images and attachment links point to local files; the runner makes no network requests. Attached emails retain their original decoded bytes instead of being rendered into the parent message.
+
+Names are sanitized and shortened only when needed to fit 255 bytes in both composed and decomposed Unicode. All files for a message share its final email stem; the date and unique ID stay intact. Full subjects and original attachment names remain in the Markdown and JSONL report. Nameless attachments receive a MIME-derived extension.
+
+Input files are read-only. Both output and control directories must be new, separate and outside the input tree; existing files are never overwritten. Created directories and files use private permissions. A message failure removes only files created for that message and other messages continue. The control directory contains `state.json` and a per-message `export-report.jsonl`; the completed output also contains the report and `summary.json`. The exit status is nonzero for message or scan failures. This converts available complete EML files, without retrieving missing server content or fixing failures recorded by the original export.
+
 ## Checks
 
 ```bash
@@ -77,6 +93,7 @@ swift build -c release
 python3 tests/cli_acceptance.py .build/release/apple-mail-exporter
 python3 tests/scale_acceptance.py .build/release/apple-mail-exporter
 python3 tests/readable_acceptance.py .build/apple-mail-conversion-worker
+python3 tests/markdown_acceptance.py
 ```
 
 ## Usage
