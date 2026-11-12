@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email import policy
 from email.parser import BytesHeaderParser
 from html.parser import HTMLParser
+from functools import lru_cache
 import json
 import mimetypes
 import os
@@ -53,7 +54,7 @@ def decode_payload(headers, body):
         if encoding == 'base64':
             return base64.b64decode(re.sub(rb'\s+', b'', body), validate=True)
         if encoding == 'quoted-printable':
-            if re.search(rb'=(?![0-9A-Fa-f]{2}|\r?\n|$)', body):
+            if re.search(rb'=(?![0-9A-Fa-f]{2}|\r?\n)', body):
                 raise ValueError('Invalid quoted-printable escape')
             return quopri.decodestring(body)
         if encoding not in ('7bit', '8bit', 'binary', ''):
@@ -65,19 +66,21 @@ def decode_payload(headers, body):
 
 class Part:
     """Retain raw leaf bodies: Message.as_bytes() would rewrite attached mail."""
-    def __init__(self, raw, body_root=False):
-        separator = re.search(rb'\r?\n\r?\n', raw)
-        if separator is None:
-            raise ConversionError('invalid_message', 'Missing MIME header/body separator')
-        self.headers = BytesHeaderParser(policy=policy.default).parsebytes(raw[:separator.start()] + b'\r\n\r\n')
+    def __init__(self, raw, body_root=False, default_type='text/plain'):
+        # An initial blank line is an empty header block. MIME parts may also
+        # have headers but no body, or be completely empty after delimiter trim.
+        separator = re.search(rb'(?:\A|\r?\n)\r?\n', raw)
+        header_bytes = raw[:separator.start()] if separator else raw
+        self.headers = BytesHeaderParser(policy=policy.default).parsebytes(header_bytes + b'\r\n\r\n')
+        self.headers.set_default_type(default_type)
         if self.headers.defects:
             raise ConversionError('invalid_message', str(self.headers.defects))
-        self.body = raw[separator.end():]
+        self.body = raw[separator.end():] if separator else b''
         self.kind = self.headers.get_content_type()
         self.filename = self.headers.get_filename()
         self.cid = str(self.headers.get('Content-ID', '')).strip().strip('<>')
         self.attachment = (self.headers.get_content_disposition() == 'attachment'
-                           or self.filename is not None or (bool(self.cid) and not body_root)
+                           or (self.filename is not None and not body_root) or (bool(self.cid) and not body_root)
                            or (not self.kind.startswith('multipart/') and self.kind not in ('text/plain', 'text/html')))
         self.children = []
         if self.kind.startswith('multipart/') and not self.attachment:
@@ -98,15 +101,16 @@ class Part:
                     child = child[:-2]
                 elif child.endswith(b'\n'):
                     child = child[:-1]
-                related_root = False
+                child_body_root = self.kind == 'multipart/alternative'
                 if self.kind == 'multipart/related':
                     start = self.headers.get_param('start')
                     if start:
                         child_headers = BytesHeaderParser(policy=policy.default).parsebytes(child)
-                        related_root = str(child_headers.get('Content-ID', '')).strip().strip('<>') == start.strip('<>')
+                        child_body_root = str(child_headers.get('Content-ID', '')).strip().strip('<>') == start.strip('<>')
                     else:
-                        related_root = not self.children
-                self.children.append(Part(child, body_root=related_root))
+                        child_body_root = not self.children
+                child_default = 'message/rfc822' if self.kind == 'multipart/digest' else 'text/plain'
+                self.children.append(Part(child, body_root=child_body_root, default_type=child_default))
 
     def has_plain_body(self):
         if self.attachment:
@@ -262,10 +266,12 @@ def output_names(source, subject, attachments):
         marker = f'_att_{index:02d}_'
         available = 255 - fixed - name_bytes(marker + extension)
         total = name_bytes(safe_subject) + name_bytes(basename)
-        if available < 2:
+        minimum_subject = name_bytes(safe_subject[0])
+        minimum_basename = name_bytes(basename[0])
+        if available < minimum_subject + minimum_basename:
             raise ConversionError('filename_too_long', 'Date, ID and attachment extension exceed filename limit')
-        subject_budget = min(subject_budget, available if total <= available else
-                             max(name_bytes(safe_subject[0]), available * name_bytes(safe_subject) // total))
+        allocation = name_bytes(safe_subject) if total <= available else available * name_bytes(safe_subject) // total
+        subject_budget = min(subject_budget, max(minimum_subject, min(allocation, available - minimum_basename)))
     shortened_subject = shorten(safe_subject, subject_budget)
     if not shortened_subject:
         raise ConversionError('filename_too_long', 'Date and ID leave no room for the subject')
@@ -285,13 +291,29 @@ def output_names(source, subject, attachments):
 
 def atomic_create(path, payload):
     descriptor, temporary = tempfile.mkstemp(prefix='.markdown-', suffix='.tmp', dir=path.parent)
+    reserved = False
     try:
         with os.fdopen(descriptor, 'wb') as stream:
             stream.write(payload)
-        # A hard link publishes a complete file while refusing an existing name.
-        os.link(temporary, path)
-    finally:
-        os.unlink(temporary)
+        # AFP lacks hard links and no-replace renames. Exclusively reserve the
+        # new name, then promote a complete file over our own empty reservation.
+        # A live reader may briefly see the reservation; existing data is never
+        # replaced. Remove it if promotion fails.
+        with path.open('xb'):
+            pass
+        reserved = True
+        os.replace(temporary, path)
+    except Exception as error:
+        cleanup_errors = []
+        for owned in ([path] if reserved else []) + [Path(temporary)]:
+            try:
+                owned.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                cleanup_errors.append({'output': str(owned), 'detail': str(cleanup_error)})
+        failure = (ConversionError('write_error', str(error))
+                   if isinstance(error, OSError) and not isinstance(error, FileExistsError) else error)
+        failure.cleanup_errors = cleanup_errors
+        raise failure
 
 
 def convert(source, input_root, output_root, metadata):
@@ -337,15 +359,28 @@ def convert(source, input_root, output_root, metadata):
         created.append(target)
         row['status'] = 'exported'
     except Exception as error:
-        for path in reversed(created):
-            path.unlink()
         reason = error.reason if isinstance(error, ConversionError) else ('output_exists' if isinstance(error, FileExistsError) else 'conversion_error')
         row.update(status='failed', reason=reason, detail=str(error))
+        cleanup_errors = list(getattr(error, 'cleanup_errors', []))
+        for path in reversed(created):
+            try:
+                path.unlink()
+            except OSError as cleanup_error:
+                cleanup_errors.append({'output': str(path), 'detail': str(cleanup_error)})
+        if cleanup_errors:
+            row['cleanup_errors'] = cleanup_errors
     return row
 
 
+@lru_cache(maxsize=None)
+def canonical_parent(path):
+    # Input roots are canonical and symlink EML files are excluded. Resolving a
+    # parent once preserves aliases without per-message metadata I/O over AFP.
+    return path.resolve()
+
+
 def path_key(path):
-    return unicodedata.normalize('NFC', str(path.resolve()))
+    return unicodedata.normalize('NFC', str(canonical_parent(path.parent) / path.name))
 
 
 def input_metadata(path, input_root):
