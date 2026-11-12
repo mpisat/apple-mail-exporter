@@ -267,6 +267,13 @@ def main():
              b'--a\r\nContent-Type: text/plain\r\nContent-ID: <plain>\r\n\r\nSelected alternative body\r\n'
              b'--a\r\nContent-Type: text/html\r\nContent-ID: <html>\r\n\r\n<p>Other alternative body</p>\r\n--a--\r\n',
              'Selected alternative body', None, None),
+            ('mixed-cid', b'Subject: Mixed CID\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n'
+             b'--m\r\nContent-Type: text/plain\r\nContent-ID: <body>\r\n\r\nMixed text body with CID\r\n--m--\r\n',
+             'Mixed text body with CID', None, None),
+            ('related-text', b'Subject: Related text resource\r\nContent-Type: multipart/related; boundary=r; start="<root>"\r\n\r\n'
+             b'--r\r\nContent-Type: text/html\r\nContent-ID: <root>\r\n\r\n<p>Related root text</p>\r\n'
+             b'--r\r\nContent-Type: text/plain\r\nContent-ID: <resource>\r\n\r\nRESOURCE TEXT\r\n--r--\r\n',
+             'Related root text', b'RESOURCE TEXT', None),
             ('filename-budget', ('Subject: ' + budget_subject + '\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n').encode()
              + b'--b\r\nContent-Type: text/plain\r\n\r\nBudget body\r\n--b\r\nContent-Type: application/pdf\r\n'
              b'Content-Disposition: attachment; filename*=utf-8\'\'%C3%A9.pdf\r\n\r\nPDF\r\n--b--\r\n',
@@ -294,7 +301,7 @@ def main():
                         assert len(row['attachments']) == 1, row
                         attachment = Path(row['attachments'][0]['output'])
                         assert attachment.read_bytes() == expected_attachment
-                        assert attachment.name.endswith('.eml' if name == 'digest' else 'é.pdf')
+                        assert attachment.name.endswith({'digest': '.eml', 'related-text': '.txt', 'filename-budget': 'é.pdf'}[name])
                         assert len(unicodedata.normalize('NFD', attachment.name).encode()) <= 255
                         if name == 'digest':
                             assert 'DIGEST BODY STAYS ATTACHED' not in document

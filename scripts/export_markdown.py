@@ -66,7 +66,7 @@ def decode_payload(headers, body):
 
 class Part:
     """Retain raw leaf bodies: Message.as_bytes() would rewrite attached mail."""
-    def __init__(self, raw, body_root=False, default_type='text/plain'):
+    def __init__(self, raw, body_root=False, default_type='text/plain', related_resource=False):
         # An initial blank line is an empty header block. MIME parts may also
         # have headers but no body, or be completely empty after delimiter trim.
         separator = re.search(rb'(?:\A|\r?\n)\r?\n', raw)
@@ -80,7 +80,7 @@ class Part:
         self.filename = self.headers.get_filename()
         self.cid = str(self.headers.get('Content-ID', '')).strip().strip('<>')
         self.attachment = (self.headers.get_content_disposition() == 'attachment'
-                           or (self.filename is not None and not body_root) or (bool(self.cid) and not body_root)
+                           or (self.filename is not None and not body_root) or related_resource
                            or (not self.kind.startswith('multipart/') and self.kind not in ('text/plain', 'text/html')))
         self.children = []
         if self.kind.startswith('multipart/') and not self.attachment:
@@ -110,7 +110,9 @@ class Part:
                     else:
                         child_body_root = not self.children
                 child_default = 'message/rfc822' if self.kind == 'multipart/digest' else 'text/plain'
-                self.children.append(Part(child, body_root=child_body_root, default_type=child_default))
+                child_resource = self.kind == 'multipart/related' and not child_body_root
+                self.children.append(Part(child, body_root=child_body_root, default_type=child_default,
+                                          related_resource=child_resource))
 
     def has_plain_body(self):
         if self.attachment:
