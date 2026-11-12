@@ -147,6 +147,35 @@ def main():
             for path in source.rglob('*'):
                 path.chmod(0o700 if path.is_dir() else 0o600)
 
+        # Account selection excludes other and unmapped EMLs. A recovered EML
+        # can exist even though its original report row recorded a failure.
+        account_report = root / 'account-report.jsonl'
+        account_report.write_text(''.join(json.dumps(row) + '\n' for row in [
+            {'output': str(paths[0]), 'account': 'other', 'status': 'exported'},
+            {'output': str(paths[1]), 'account': 'priority', 'status': 'failed'},
+            {'output': unicodedata.normalize('NFC', str(source_alias / paths[3].relative_to(source))),
+             'account': 'priority', 'status': 'exported'},
+        ]))
+        selected_output = root / 'SelectedAccount'
+        result = run(source, selected_output, root / 'selected-control',
+                     '--input-report', str(account_report), '--account', 'priority')
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        rows = [json.loads(line) for line in (selected_output / 'export-report.jsonl').read_text().splitlines()]
+        assert {row['id'] for row in rows} == {'00000002', '00000004'}, rows
+        assert all(row['status'] == 'exported' and row['account'] == 'priority' for row in rows), rows
+        summary = json.loads((selected_output / 'summary.json').read_text())
+        assert summary['account'] == 'priority' and summary['expected'] == summary['exported'] == 2, summary
+        assert len(list(selected_output.rglob('*.md'))) == 2
+        for name, options, reason in [
+            ('missing-report', ['--account', 'priority'], 'account_requires_report'),
+            ('unknown-account', ['--input-report', str(account_report), '--account', 'absent'], 'account_not_found'),
+            ('empty-account', ['--input-report', str(account_report), '--account', ''], 'account_not_found'),
+        ]:
+            bad_output, bad_control = root / name, root / (name + '-control')
+            result = run(source, bad_output, bad_control, *options)
+            assert result.returncode != 0 and reason in result.stderr, result.stderr
+            assert not bad_output.exists() and not bad_control.exists()
+
         # Invalid encoding is a per-message failure; a subsequent healthy message survives.
         failure_source = root / 'failure-source'
         failure_source.mkdir()

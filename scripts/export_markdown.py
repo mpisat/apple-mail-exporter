@@ -391,7 +391,9 @@ def input_metadata(path, input_root):
         with path.open(encoding='utf-8') as stream:
             for line in stream:
                 row = json.loads(line)
-                if row.get('output') and row.get('status') == 'exported':
+                # Account provenance remains useful after a failed EML is
+                # recovered separately; the input scan decides which files exist.
+                if row.get('output'):
                     source = Path(row['output'])
                     if not source.is_absolute():
                         source = input_root / source
@@ -411,6 +413,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--control', type=Path, required=True)
     parser.add_argument('--input-report', type=Path)
+    parser.add_argument('--account', help='Export only this exact account ID from --input-report')
     parser.add_argument('--priority-account', default='')
     parser.add_argument('--workers', type=int, default=8)
     args = parser.parse_args()
@@ -430,6 +433,12 @@ def main():
         metadata = input_metadata(args.input_report, source)
     except (OSError, ValueError, TypeError) as error:
         parser.error(f'invalid_input_report: {error}')
+    if args.account is not None:
+        if not args.input_report:
+            parser.error('account_requires_report: --account requires --input-report')
+        accounts = {row.get('account') for row in metadata.values() if row.get('account')}
+        if args.account not in accounts:
+            parser.error('account_not_found: --account must match an account ID in --input-report')
     os.umask(0o077)
     control.mkdir(mode=0o700, parents=True, exist_ok=False)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -438,6 +447,8 @@ def main():
         for name in names:
             path = Path(directory) / name
             if name.lower().endswith('.eml'):
+                if args.account is not None and metadata.get(path_key(path), {}).get('account') != args.account:
+                    continue
                 if path.is_symlink():
                     scan_errors.append(f'Symlink EML skipped: {path}')
                 else:
@@ -448,12 +459,12 @@ def main():
     for path in files:
         work.put(path)
     state = {'status': 'running', 'coordinator_pid': os.getpid(), 'input': str(source), 'output': str(output),
-             'priority_account': args.priority_account, 'workers': args.workers, 'expected': len(files),
+             'account': args.account, 'priority_account': args.priority_account, 'workers': args.workers, 'expected': len(files),
              'started_unix': time.time(), 'processed': 0, 'exported': 0, 'failed': 0,
              'scan_errors': scan_errors, 'accounts': {}}
     lock = threading.Lock()
     report_path = control / 'export-report.jsonl'
-    print(json.dumps({'output': str(output), 'messages': len(files), 'workers': args.workers}), flush=True)
+    print(json.dumps({'output': str(output), 'account': args.account, 'messages': len(files), 'workers': args.workers}), flush=True)
     replace_state(control / 'state.json', state)
     with report_path.open('x', encoding='utf-8', buffering=1) as report:
         def worker():
